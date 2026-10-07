@@ -18,7 +18,7 @@ namespace Apocaunloader
     {
         public const string GUID = "com.denis.apocalypter.apocaunloader";
         public const string NAME = "Apocaunloader";
-        public const string VERSION = "1.1.1";
+        public const string VERSION = "1.2.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -26,6 +26,7 @@ namespace Apocaunloader
         internal static ConfigEntry<Key> FallbackKey;
         internal static ConfigEntry<float> PhaseTimeout;
         internal static ConfigEntry<bool> Verbose;
+        internal static ConfigEntry<bool> DropBackpackOverflow;
 
         // Frame on which a "tap" (short press released) of the Reload button happened.
         internal static int TapFrame = -100;
@@ -35,11 +36,12 @@ namespace Apocaunloader
         {
             Log = Logger;
             Config.Bind("General", "Apocasetter", true, "Show this mod in the Apocasetter Mods menu");
-            Enabled = Config.Bind("General", "Enabled", true, "Enable hold-to-unload. When disabled the game's reload behaves exactly as before.");
+            Enabled = Config.Bind("General", "Enabled", true, "Enable unloading and backpack overflow protection. When disabled, vanilla behavior is restored.");
             HoldSeconds = Config.Bind("General", "HoldSeconds", 0.35f, new ConfigDescription("How long the Reload button must be held to unload instead of reload. A shorter press reloads (on release).", new AcceptableValueRange<float>(0.1f, 2f)));
             PhaseTimeout = Config.Bind("General", "AnimationTimeout", 4f, new ConfigDescription("Safety timeout (seconds) if an animation event never arrives.", new AcceptableValueRange<float>(1f, 10f)));
             FallbackKey = Config.Bind("General", "FallbackKey", Key.R, "Key polled if the game's 'Reload' input axis cannot be read.");
             Verbose = Config.Bind("General", "VerboseLog", true, "Log every step to the BepInEx console/log.");
+            DropBackpackOverflow = Config.Bind("General", "DropBackpackOverflow", true, "Drop excess ammo when switching to a smaller backpack or removing it. If spawning fails, retain the ammo and retry.");
 
             var harmony = new Harmony(GUID);
             harmony.PatchAll(typeof(Plugin).Assembly);
@@ -49,7 +51,7 @@ namespace Apocaunloader
             Log.LogInfo(NAME + " " + VERSION + " loaded. Hold Reload for " + HoldSeconds.Value + "s to unload the current gun.");
         }
 
-        private void OnSceneLoaded(Scene scene, LoadSceneMode mode) { EnsureRunner("sceneLoaded"); }
+        private void OnSceneLoaded(Scene scene, LoadSceneMode mode) { BackpackOverflow.Reset(); EnsureRunner("sceneLoaded"); }
 
         internal static void EnsureRunner(string reason)
         {
@@ -84,6 +86,7 @@ namespace Apocaunloader
 
         private void Update()
         {
+            BackpackOverflow.Tick();
             if (!Plugin.Enabled.Value) { Unloader.Tick(); return; }
 
             bool down = Plugin.ReloadHeld();
@@ -105,6 +108,92 @@ namespace Apocaunloader
             }
 
             Unloader.Tick();
+        }
+    }
+
+    /// Preserve ammo before the vanilla per-frame clamp discards it after a capacity reduction.
+    internal static class BackpackOverflow
+    {
+        private static readonly Dictionary<IntClamp, OverflowTransfer> _capacities = new Dictionary<IntClamp, OverflowTransfer>();
+        private static Fsm _emptySlot;
+        private static int _removalFrame;
+        internal static bool Enabled { get { return Plugin.Enabled.Value && Plugin.DropBackpackOverflow.Value; } }
+
+        internal static void Reset() { _capacities.Clear(); _emptySlot = null; }
+
+        internal static bool BeforeClamp(IntClamp action)
+        {
+            var fsm = action.Fsm;
+            if (fsm == null || fsm.Name != "Ammo" || fsm.GameObject == null || fsm.GameObject.name != "__GameManager__") return true;
+            var count = action.intVariable;
+            var max = action.maxValue;
+            if (count == null || max == null || !count.Name.StartsWith("ammo_", StringComparison.Ordinal) || max.Name != count.Name + "_capacity") return true;
+            if (!Enabled) { _capacities.Remove(action); return true; }
+
+            int capacity = Math.Max(0, max.Value);
+            OverflowTransfer state;
+            if (!_capacities.TryGetValue(action, out state))
+            {
+                // Establish a baseline without spilling ammo during scene initialization/save loading.
+                _capacities[action] = new OverflowTransfer(capacity);
+                return true;
+            }
+            int retained;
+            bool allowClamp = state.BeforeClamp(count.Value, capacity, Time.unscaledTime,
+                excess => AmmoBox.Drop(count.Name, excess, fsm.GameObject.transform), out retained);
+            if (retained != count.Value)
+            {
+                int excess = count.Value - retained;
+                count.Value = retained;
+                Plugin.Log.LogInfo("Backpack capacity reduced: dropped " + excess + " x " + count.Name + "; retained " + count.Value + "/" + capacity);
+            }
+            // Letting vanilla run here would delete the ammo we could not put into a world item.
+            return allowClamp;
+        }
+
+        internal static void OnSlotEnter(FsmState state)
+        {
+            var fsm = state.Fsm;
+            if (!Enabled || fsm == null || fsm.Name != "SlotEmptyFull" || fsm.GameObject == null || fsm.GameObject.name != "Backpack_Item") return;
+            if (state.Name == "full") { _emptySlot = null; return; }
+            var item = fsm.Variables.GetFsmGameObject("item");
+            if (state.Name != "empty" || item == null || item.Value == null) return;
+            _emptySlot = fsm;
+            _removalFrame = Time.frameCount;
+        }
+
+        internal static void Tick()
+        {
+            if (!Enabled) { Reset(); return; }
+            if (_emptySlot == null || Time.frameCount <= _removalFrame) return;
+            var slot = _emptySlot.GameObject;
+            if (slot == null || _emptySlot.ActiveStateName != "empty" || slot.transform.childCount != 0) { _emptySlot = null; return; }
+            var take = PlayMakerFSM.FindFsmOnGameObject(slot, "TakeItem");
+            // Swapping packs temporarily empties the slot while dropCurrent waits one frame.
+            if (take != null && (take.ActiveStateName == "dropCurrent" || take.ActiveStateName == "takeWeapon")) return;
+
+            var gm = GameObject.Find("__GameManager__");
+            var backpack = gm != null ? PlayMakerFSM.FindFsmOnGameObject(gm, "Backpack") : null;
+            var ammo = gm != null ? PlayMakerFSM.FindFsmOnGameObject(gm, "Ammo") : null;
+            var armor = gm != null ? PlayMakerFSM.FindFsmOnGameObject(gm, "ArmorBackpack") : null;
+            if (backpack == null || ammo == null || armor == null) return;
+            var set = backpack.FsmStates.FirstOrDefault(s => s.Name == "set");
+            if (set == null) return;
+            // Read vanilla's base capacities instead of duplicating its caliber table.
+            foreach (var action in set.Actions.OfType<SetIntValue>())
+            {
+                if (!action.Enabled || action.intVariable == null || action.intValue == null) continue;
+                string name = action.intVariable.Name;
+                if (!name.StartsWith("ammo_", StringComparison.Ordinal) || !name.EndsWith("_capacity", StringComparison.Ordinal)) continue;
+                var capacity = ammo.FsmVariables.GetFsmInt(name);
+                if (capacity != null) capacity.Value = action.intValue.Value;
+            }
+            var packCapacity = armor.FsmVariables.GetFsmFloat("backpack_capacity");
+            var multiply = backpack.FsmVariables.GetFsmFloat("multiply");
+            if (packCapacity != null) packCapacity.Value = 0f;
+            if (multiply != null) multiply.Value = 1f;
+            _emptySlot = null;
+            Plugin.V("Backpack removed: restored base ammo capacities");
         }
     }
 
@@ -283,6 +372,7 @@ namespace Apocaunloader
             { "ammo_762", "ammo_box_762mm" }, { "ammo_556", "ammo_box_556mm" }, { "ammo_9mm", "ammo_box_9mm" },
             { "ammo_12gauge", "ammo_box_12gauge" }, { "ammo_20gauge", "ammo_box_20gauge" }, { "ammo_22caliber", "ammo_box_22" },
             { "ammo_3006", "ammo_box_3006" }, { "ammo_arrow", "ammo_arrow" },
+            { "ammo_battery", "flashlight_batteries" }, { "ammo_grenade", "grenade" },
         };
         private static readonly Dictionary<string, GameObject> _prefabs = new Dictionary<string, GameObject>();
 
@@ -302,8 +392,11 @@ namespace Apocaunloader
             foreach (var go in Resources.FindObjectsOfTypeAll<GameObject>())
             {
                 if (go == null || go.transform.parent != null) continue;
+                if (go.name != name && !go.name.StartsWith(name + "(Clone)", StringComparison.Ordinal)) continue;
+                string fsmName = caliber == "ammo_battery" ? "Batteries" : "Ammo";
+                if (!go.GetComponents<PlayMakerFSM>().Any(f => f.FsmName == fsmName)) continue;
                 if (!go.scene.IsValid()) { if (go.name == name && asset == null) asset = go; }
-                else if (instance == null && go.name.StartsWith(name + "(Clone)") && PlayMakerFSM.FindFsmOnGameObject(go, "Ammo") != null) instance = go;
+                else if (instance == null && go.name.StartsWith(name + "(Clone)", StringComparison.Ordinal)) instance = go;
             }
             var found = asset ?? instance;
             if (found != null) { _prefabs[caliber] = found; Plugin.V("Ammo box template for " + caliber + ": " + found.name + (asset != null ? " (prefab)" : " (scene copy)")); }
@@ -313,55 +406,87 @@ namespace Apocaunloader
 
         internal static bool Drop(string caliber, int rounds, Transform at)
         {
+            if (rounds <= 0 || at == null) return false;
             var prefab = FindPrefab(caliber);
             if (prefab == null) return false;
-
+            var counterGo = GameObject.Find("itemNameID");
+            var cf = counterGo != null ? PlayMakerFSM.FindFsmOnGameObject(counterGo, "itemNameID") : null;
+            var counter = cf != null ? cf.FsmVariables.GetFsmInt("intName") : null;
+            var reg = GameObject.Find("NewGO_ArrayList");
+            var list = reg != null ? reg.GetComponents<PlayMakerArrayListProxy>().FirstOrDefault(p => (p.referenceName ?? "").ToLowerInvariant().Contains("item")) : null;
+            if (counter == null || list == null)
+            {
+                Plugin.Log.LogWarning("Cannot drop " + caliber + ": save registry/counter unavailable; retaining ammo");
+                return false;
+            }
             var cam = Camera.main != null ? Camera.main.transform : at;
             var fwd = Vector3.ProjectOnPlane(cam.forward, Vector3.up).normalized;
             if (fwd.sqrMagnitude < 0.01f) fwd = at.forward;
             var pos = cam.position + fwd * 0.7f - Vector3.up * 0.3f;
-
-            var go = UnityEngine.Object.Instantiate(prefab, pos, UnityEngine.Random.rotation);
-            go.SetActive(true);
-
-            // Name + register exactly like the game's own spawner so Easy Save picks it up.
-            int id = -1;
-            var counterGo = GameObject.Find("itemNameID");
-            if (counterGo != null)
+            var created = new List<GameObject>();
+            var staging = new GameObject("Apocaunloader.DropStaging");
+            staging.SetActive(false);
+            try
             {
-                var cf = PlayMakerFSM.FindFsmOnGameObject(counterGo, "itemNameID");
-                var counter = cf != null ? cf.FsmVariables.GetFsmInt("intName") : null;
-                if (counter != null) { counter.Value += 1; id = counter.Value; }
+                // Grenades are individual items; boxes/arrows/batteries store an ammo count.
+                int itemCount = caliber == "ammo_grenade" ? rounds : 1;
+                for (int i = 0; i < itemCount; i++)
+                {
+                    // Configure before activation so Randomize cannot overwrite the returned rounds.
+                    var go = UnityEngine.Object.Instantiate(prefab, pos, UnityEngine.Random.rotation, staging.transform);
+                    created.Add(go);
+                    go.SetActive(false);
+                    var fsms = go.GetComponents<PlayMakerFSM>();
+                    var rnd = fsms.FirstOrDefault(f => f.FsmName == "Randomize");
+                    if (rnd != null) rnd.enabled = false;
+                    var ammo = fsms.FirstOrDefault(f => f.FsmName == (caliber == "ammo_battery" ? "Batteries" : "Ammo"));
+                    var v = ammo != null ? ammo.FsmVariables.GetFsmInt(caliber == "ammo_battery" ? "batteries" : "ammo") : null;
+                    if (v == null) throw new InvalidOperationException(go.name + " has no ammo count variable");
+                    v.Value = caliber == "ammo_grenade" ? 1 : rounds;
+                    counter.Value += 1;
+                    go.name = BoxName(caliber) + "(Clone)" + counter.Value;
+                    list.arrayList.Add(go);
+                }
+                foreach (var go in created)
+                {
+                    go.transform.SetParent(null, true);
+                    go.SetActive(true);
+                    var rb = go.GetComponent<Rigidbody>();
+                    if (rb != null) { rb.isKinematic = false; rb.velocity = fwd * 1.5f; }
+                }
+                Plugin.Log.LogInfo("Dropped " + rounds + " x " + caliber + " in " + created.Count + " save-registered item(s)");
+                return true;
             }
-            go.name = prefab.name.Replace("(Clone)", "") + "(Clone)" + (id >= 0 ? id.ToString() : "");
-            if (id < 0) { int i = go.name.IndexOf("(Clone)"); if (i > 0) go.name = go.name.Substring(0, i) + "(Clone)"; }
-
-            var reg = GameObject.Find("NewGO_ArrayList");
-            if (reg != null)
+            catch (Exception ex)
             {
-                var proxies = reg.GetComponents<PlayMakerArrayListProxy>();
-                var list = proxies.FirstOrDefault(p => (p.referenceName ?? "").ToLowerInvariant().Contains("item"))
-                           ?? proxies.FirstOrDefault(p => !(p.referenceName ?? "").ToLowerInvariant().Contains("sand"));
-                if (list != null) list.arrayList.Add(go);
+                foreach (var go in created)
+                {
+                    list.arrayList.Remove(go);
+                    go.SetActive(false);
+                    UnityEngine.Object.Destroy(go);
+                }
+                Plugin.Log.LogWarning("Could not drop " + caliber + "; retaining ammo: " + ex.Message);
+                return false;
             }
-
-            var rnd = PlayMakerFSM.FindFsmOnGameObject(go, "Randomize");
-            if (rnd != null) rnd.enabled = false;
-            var ammo = PlayMakerFSM.FindFsmOnGameObject(go, "Ammo");
-            var v = ammo != null ? ammo.FsmVariables.GetFsmInt("ammo") : null;
-            if (v == null) { Plugin.Log.LogWarning(go.name + " has no Ammo/ammo variable; destroying it"); UnityEngine.Object.Destroy(go); return false; }
-            v.Value = rounds;
-
-            var rb = go.GetComponent<Rigidbody>();
-            if (rb != null) { rb.isKinematic = false; rb.velocity = fwd * 1.5f; }
-            Plugin.Log.LogInfo("Dropped " + go.name + " with " + rounds + " rounds");
-            return true;
+            finally { UnityEngine.Object.Destroy(staging); }
         }
     }
 
     // ---------------------------------------------------------------------------------
     // Harmony patches
     // ---------------------------------------------------------------------------------
+
+    [HarmonyPatch(typeof(IntClamp), "DoClamp")]
+    internal static class AmmoCapacity_Patch
+    {
+        static bool Prefix(IntClamp __instance) { return BackpackOverflow.BeforeClamp(__instance); }
+    }
+
+    [HarmonyPatch(typeof(FsmState), "OnEnter")]
+    internal static class BackpackSlot_Patch
+    {
+        static void Postfix(FsmState __instance) { BackpackOverflow.OnSlotEnter(__instance); }
+    }
 
     /// The game's Reload FSMs poll GetButtonDown("Reload"). We take over that button: it no longer fires on press;
     /// instead we fire the action's event on a short tap (released before HoldSeconds).

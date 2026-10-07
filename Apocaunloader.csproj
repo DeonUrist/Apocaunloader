@@ -13,6 +13,7 @@
     <BepInExCore>$(GameDir)\BepInEx\core</BepInExCore>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="verification\**\*.cs" />
     <Reference Include="BepInEx"><HintPath>$(BepInExCore)\BepInEx.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="0Harmony"><HintPath>$(BepInExCore)\0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine"><HintPath>$(ManagedDir)\UnityEngine.dll</HintPath><Private>false</Private></Reference>
@@ -21,9 +22,10 @@
     <Reference Include="Unity.InputSystem"><HintPath>$(ManagedDir)\Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Assembly-CSharp"><HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.AudioModule"><HintPath>$(ManagedDir)\UnityEngine.AudioModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="PlayMaker"><HintPath>$(ManagedDir)\PlayMaker.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
-  <Target Name="DeployToGame" AfterTargets="Build">
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' != 'false'">
     <Copy SourceFiles="$(OutDir)$(AssemblyName).dll" DestinationFolder="$(GameDir)\BepInEx\plugins" />
     <Message Importance="high" Text="Deployed $(AssemblyName).dll to $(GameDir)\BepInEx\plugins" />
   </Target>

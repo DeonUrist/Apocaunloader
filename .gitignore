@@ -10,3 +10,5 @@ obj/
 # BepInEx / game artefacts
 LogOutput.log
 *.cfg
+verification/runtime/
+verification/output/

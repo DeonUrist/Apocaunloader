@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework><OutputType>Exe</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <OutputPath>bin/logic/</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\OverflowTransfer.cs" Link="OverflowTransfer.cs" />
+    <Compile Include="LogicTests.cs" />
+  </ItemGroup>
+</Project>
