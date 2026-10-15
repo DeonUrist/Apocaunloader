@@ -6,6 +6,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\OverflowTransfer.cs" Link="OverflowTransfer.cs" />
+    <Compile Include="..\MagazineLedger.cs" Link="MagazineLedger.cs" />
+    <Compile Include="MagazineTests.cs" />
     <Compile Include="LogicTests.cs" />
   </ItemGroup>
 </Project>

@@ -11,4 +11,5 @@ obj/
 LogOutput.log
 *.cfg
 verification/runtime/
+verification/runtime-*/
 verification/output/

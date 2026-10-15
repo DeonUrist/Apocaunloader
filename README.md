@@ -6,6 +6,13 @@ Tapping the reload key reloads as usual; holding it plays the reload animation a
 backpack. Anything that does not fit in the backpack is dropped as an ammo box of the right caliber.
 Switching to a smaller backpack or removing it also drops excess ammo instead of losing it to the game's capacity clamp.
 
+Version **1.3.0** also gives each physical gun its own magazine. Two identical guns can hold different loaded ammo counts;
+switching, dropping and picking up a tracked gun, and saving/loading preserve its rounds and hammer/chamber state.
+This works through native weapon switching, including Apocapocket's borrowed slots, with no dependency on Apocapocket.
+
+On an existing vanilla/older-mod save, the first gun drawn of each type inherits that type's existing loaded rounds.
+Other copies start empty, preventing the old shared magazine from being duplicated. Backpack reserve ammo remains shared by caliber.
+
 ## Features
 
 - Works with all 17 guns (magazine, per-shell and three-phase reload styles) by replaying each gun's own reload FSM events, so the
@@ -15,6 +22,8 @@ Switching to a smaller backpack or removing it also drops excess ammo instead of
 - Backpack capacity reductions drop only the excess. Removal restores the game's base ammo capacities; the temporary empty
   slot during a swap does not trigger removal drops. Failed drops retain the ammo and retry once per second.
 - Batteries drop as a battery pack containing the exact excess; grenades drop as individual items.
+- Per-item magazines are saved under `Apocaunloader.Magazines` in the same character save, including guns previously dropped
+  in the world. Switching during an unload finishes the transfer for the outgoing gun; loading cancels the old transaction.
 - Opt-in entry in the [Apocasetter](../Apocasetter) Mods menu (no dependency on it).
 
 ## Installation
@@ -26,7 +35,7 @@ Config: `BepInEx\config\com.denis.apocalypter.apocaunloader.cfg`, section `[Gene
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `Enabled` | `true` | Turn the mod on/off |
+| `Enabled` | `true` | Enable unloading/overflow protection; per-gun magazines remain tracked to preserve loaded rounds |
 | `DropBackpackOverflow` | `true` | Preserve excess ammo when changing/removing backpacks |
 | `HoldSeconds` | `0.35` | Hold time that turns a reload into an unload (0.1–2) |
 | `AnimationTimeout` | `4` | Seconds to wait for each animation phase before falling back (1–10) |
@@ -41,6 +50,8 @@ Config: `BepInEx\config\com.denis.apocalypter.apocaunloader.cfg`, section `[Gene
 
 Use `-p:DeployToGame=false` to build without deployment. Run `dotnet run --project verification/LogicTests.csproj -c Release`
 to check ammo conservation, capacity changes, failure retention and retries without launching the game.
+Run `./verification/RunNative.ps1` for an isolated, hidden Unity/PlayMaker/Easy Save verification process. Its save paths are
+redirected to `verification/output`; it uses synthetic weapon FSMs and does not use your character saves or running game.
 
 ## How it works
 
@@ -53,3 +64,10 @@ A prefix on `IntClamp.DoClamp` watches only `__GameManager__/Ammo` capacity redu
 can discard it. Initial capacity observation establishes a baseline without spawning items during scene initialization.
 A `FsmState.OnEnter` postfix watches the backpack slot's empty/full states and schedules base-capacity restoration after
 actual removal, allowing a swap to finish first. Base capacities come from the game's `Backpack/set` actions.
+
+A scoped prefix on `ActivateGameObject.OnEnter` restores a gun's magazine before `WeaponInHand` activates its shared arm
+model. `WeaponInHand/Deactivate` captures the outgoing magazine before deactivation. The selected physical `Item` and its
+unique save-stable name identify the gun; type identifies which vanilla pool can be inherited during migration.
+Save/load hooks write a versioned string into the native Easy Save cache and restore it from the exact requested slot.
+The final `StoreCachedFile(ES3Settings)` hook also handles Apocasaver's rebuilt cache. Temporary activation of all arm models
+while saving never claims magazines. Invalid/unsupported metadata suspends per-gun overrides for that session and is retained.

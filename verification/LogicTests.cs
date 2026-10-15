@@ -52,6 +52,7 @@ internal static class LogicTests
                     throw new Exception("Ammo conservation failed for " + count + "/" + capacity);
             }
         Check(true, "15,251 count/capacity combinations conserve ammo and respect capacity");
+        MagazineTests.Run(Check);
         Console.WriteLine(checks + " checks passed");
     }
 }

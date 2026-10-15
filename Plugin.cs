@@ -18,7 +18,7 @@ namespace Apocaunloader
     {
         public const string GUID = "com.denis.apocalypter.apocaunloader";
         public const string NAME = "Apocaunloader";
-        public const string VERSION = "1.2.0";
+        public const string VERSION = "1.3.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -36,7 +36,7 @@ namespace Apocaunloader
         {
             Log = Logger;
             Config.Bind("General", "Apocasetter", true, "Show this mod in the Apocasetter Mods menu");
-            Enabled = Config.Bind("General", "Enabled", true, "Enable unloading and backpack overflow protection. When disabled, vanilla behavior is restored.");
+            Enabled = Config.Bind("General", "Enabled", true, "Enable unloading and backpack overflow protection. Per-gun magazines remain tracked when disabled, to preserve loaded rounds.");
             HoldSeconds = Config.Bind("General", "HoldSeconds", 0.35f, new ConfigDescription("How long the Reload button must be held to unload instead of reload. A shorter press reloads (on release).", new AcceptableValueRange<float>(0.1f, 2f)));
             PhaseTimeout = Config.Bind("General", "AnimationTimeout", 4f, new ConfigDescription("Safety timeout (seconds) if an animation event never arrives.", new AcceptableValueRange<float>(1f, 10f)));
             FallbackKey = Config.Bind("General", "FallbackKey", Key.R, "Key polled if the game's 'Reload' input axis cannot be read.");
@@ -51,7 +51,7 @@ namespace Apocaunloader
             Log.LogInfo(NAME + " " + VERSION + " loaded. Hold Reload for " + HoldSeconds.Value + "s to unload the current gun.");
         }
 
-        private void OnSceneLoaded(Scene scene, LoadSceneMode mode) { BackpackOverflow.Reset(); EnsureRunner("sceneLoaded"); }
+        private void OnSceneLoaded(Scene scene, LoadSceneMode mode) { BackpackOverflow.Reset(); PerGunAmmo.SceneChanged(); EnsureRunner("sceneLoaded"); }
 
         internal static void EnsureRunner(string reason)
         {
@@ -86,6 +86,7 @@ namespace Apocaunloader
 
         private void Update()
         {
+            try { PerGunAmmo.Tick(); } catch (Exception e) { PerGunAmmo.Fail(e); }
             BackpackOverflow.Tick();
             if (!Plugin.Enabled.Value) { Unloader.Tick(); return; }
 
@@ -213,6 +214,7 @@ namespace Apocaunloader
 
         public void TryStart()
         {
+            if (PerGunAmmo.Suspended) return;
             var reload = FindActiveReloadFsm();
             if (reload == null) { Plugin.V("No active weapon Reload FSM in idle"); return; }
             var inGun = reload.FsmVariables.GetFsmInt("ammo_in_gun");
@@ -315,17 +317,26 @@ namespace Apocaunloader
             }
             var mirror = _reload.FsmVariables.GetFsmInt("ammo");
             if (mirror != null) mirror.Value = store.Value;
+            if (inGun.Value == 0)
+            {
+                var attack = PerGunAmmo.Find(_weapon, "Attack");
+                var hammer = attack == null ? null : attack.FsmVariables.GetFsmBool("hammer");
+                if (hammer != null) hammer.Value = false;
+            }
             Plugin.Log.LogInfo("Returned " + toStore + " x " + _caliber + " to backpack (now " + store.Value + "/" + cap + ")" + (leftover > 0 ? ", " + leftover + " dropped as a box" : ""));
         }
 
         private void Finish()
         {
             MoveAmmo();
+            _phase = Phase.Idle; // Event replay can synchronously re-enter this hook.
             var idle = FindState(_reload, "idle");
             if (idle != null && _weapon != null && _weapon.activeInHierarchy) ReplaySendEvents(idle); // MenuOut / Activate: re-enable firing etc.
-            _phase = Phase.Idle;
-            _reload = null; _weapon = null;
+            _reload = null; _weapon = null; _ammoFsm = null;
         }
+
+        internal void CompleteForSwitch() { if (Busy) Finish(); }
+        internal void CancelForLoad() { _phase = Phase.Idle; _reload = null; _weapon = null; _ammoFsm = null; }
 
         private void ReplaySendEvents(FsmState st)
         {

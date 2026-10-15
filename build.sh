@@ -7,5 +7,5 @@ mcs -nostdlib -noconfig -target:library -langversion:7 -optimize+ -out:${1:-Apoc
   -r:$B/BepInEx.dll -r:$B/0Harmony.dll \
   -r:$M/UnityEngine.dll -r:$M/UnityEngine.CoreModule.dll -r:$M/UnityEngine.InputLegacyModule.dll \
   -r:$M/UnityEngine.PhysicsModule.dll -r:$M/UnityEngine.AudioModule.dll -r:$M/Unity.InputSystem.dll \
-  -r:$M/PlayMaker.dll -r:$M/Assembly-CSharp.dll \
-  Plugin.cs OverflowTransfer.cs
+  -r:$M/PlayMaker.dll -r:$M/Assembly-CSharp.dll -r:$M/Assembly-CSharp-firstpass.dll \
+  Plugin.cs OverflowTransfer.cs MagazineLedger.cs PerGunAmmo.cs AssemblyInfo.cs
